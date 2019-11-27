@@ -373,6 +373,12 @@ WifiPhy::GetTypeId (void)
                      "Trace source indicating the end of the 802.11ax preamble (after training fields)",
                      MakeTraceSourceAccessor (&WifiPhy::m_phyEndOfHePreambleTrace),
                      "ns3::WifiPhy::EndOfHePreambleTracedCallback")
+    .AddTraceSource ("PhyRxBegin2",
+                     "Trace source indicating a packet and power"
+                     "has begun being received from the channel medium "
+                     "by the device",
+                     MakeTraceSourceAccessor (&WifiPhy::m_phyRxBeginTrace2),
+                     "ns3::Packet::TracedCallback")
   ;
   return tid;
 }
@@ -2414,6 +2420,24 @@ WifiPhy::NotifyRxBegin (Ptr<const Packet> packet)
     }
 }
 
+void 
+WifiPhy::MyNotifyRxBegin (Ptr<const Packet> packet, double rxPowerW)
+{
+  if (IsAmpdu (packet))
+    {
+      std::list<Ptr<const Packet>> mpdus = MpduAggregator::PeekMpdus (packet);
+      for (auto & mpdu : mpdus)
+        {
+          m_phyRxBeginTrace2 (mpdu, rxPowerW);
+        }
+    }
+  else
+    {
+      m_phyRxBeginTrace2 (packet, rxPowerW);
+    }
+}
+
+
 void
 WifiPhy::NotifyRxEnd (Ptr<const Packet> packet)
 {
@@ -2715,6 +2739,59 @@ WifiPhy::StartReceiveHeader (Ptr<Event> event, Time rxDuration)
   // for any received signal greater than the CCA-ED threshold.
   MaybeCcaBusyDuration ();
 }
+
+void
+WifiPhy::MyStartReceiveHeader (Ptr<Event> event, Time rxDuration, double rxPowerW)
+{
+  NS_LOG_FUNCTION (this << event->GetPacket () << event->GetTxVector () << event << rxDuration);
+  NS_ASSERT (!IsStateRx ());
+  NS_ASSERT (m_endPlcpRxEvent.IsExpired ());
+
+  InterferenceHelper::SnrPer snrPer = m_interference.CalculateLegacyPhyHeaderSnrPer (event);
+  double snr = snrPer.snr;
+  NS_LOG_DEBUG ("snr(dB)=" << RatioToDb (snrPer.snr) << ", per=" << snrPer.per);
+
+  if (!m_preambleDetectionModel || (m_preambleDetectionModel->IsPreambleDetected (event->GetRxPowerW (), snr, m_channelWidth)))
+    {
+      m_state->SwitchToRx (rxDuration);
+      MyNotifyRxBegin (event->GetPacket (), rxPowerW);
+
+      m_timeLastPreambleDetected = Simulator::Now ();
+
+      WifiTxVector txVector = event->GetTxVector ();
+
+      if (txVector.GetNss () > GetMaxSupportedRxSpatialStreams ())
+        {
+          NS_LOG_DEBUG ("Packet reception could not be started because not enough RX antennas");
+          NotifyRxDrop (event->GetPacket (), UNSUPPORTED_SETTINGS);
+          MaybeCcaBusyDuration ();
+          return;
+        }
+
+      if ((txVector.GetMode ().GetModulationClass () == WIFI_MOD_CLASS_HT) && (txVector.GetPreambleType () == WIFI_PREAMBLE_HT_GF))
+        {
+          //No legacy PHY header for HT GF
+          Time remainingPreambleHeaderDuration = CalculatePlcpPreambleAndHeaderDuration (txVector) - GetPreambleDetectionDuration ();
+          m_endPlcpRxEvent = Simulator::Schedule (remainingPreambleHeaderDuration, &WifiPhy::StartReceivePayload, this, event);
+        }
+      else
+        {
+          //Schedule end of legacy PHY header
+          Time remainingPreambleAndLegacyHeaderDuration = GetPlcpPreambleDuration (txVector) + GetPlcpHeaderDuration (txVector) - GetPreambleDetectionDuration ();
+          m_endPlcpRxEvent = Simulator::Schedule (remainingPreambleAndLegacyHeaderDuration, &WifiPhy::ContinueReceiveHeader, this, event);
+        }
+    }
+  else
+    {
+      NS_LOG_DEBUG ("Drop packet because PHY preamble detection failed");
+      NotifyRxDrop (event->GetPacket (), PREAMBLE_DETECT_FAILURE);
+      m_interference.NotifyRxEnd ();
+    }
+  // Like CCA-SD, CCA-ED is governed by the 4μs CCA window to flag CCA-BUSY
+  // for any received signal greater than the CCA-ED threshold.
+  MaybeCcaBusyDuration ();
+}
+
 
 void
 WifiPhy::ContinueReceiveHeader (Ptr<Event> event)
@@ -4231,8 +4308,8 @@ WifiPhy::StartRx (Ptr<Event> event, double rxPowerW, Time rxDuration)
     {
       Time startOfPreambleDuration = GetPreambleDetectionDuration ();
       Time remainingRxDuration = rxDuration - startOfPreambleDuration;
-      m_endPreambleDetectionEvent = Simulator::Schedule (startOfPreambleDuration, &WifiPhy::StartReceiveHeader, this,
-                                                         event, remainingRxDuration);
+      m_endPreambleDetectionEvent = Simulator::Schedule (startOfPreambleDuration, &WifiPhy::MyStartReceiveHeader, this,
+                                                         event, remainingRxDuration, rxPowerW);
     }
   else if ((m_frameCaptureModel != 0) && (rxPowerW > m_currentEvent->GetRxPowerW ()))
     {
@@ -4243,8 +4320,8 @@ WifiPhy::StartRx (Ptr<Event> event, double rxPowerW, Time rxDuration)
       m_interference.NotifyRxStart ();
       Time startOfPreambleDuration = GetPreambleDetectionDuration ();
       Time remainingRxDuration = rxDuration - startOfPreambleDuration;
-      m_endPreambleDetectionEvent = Simulator::Schedule (startOfPreambleDuration, &WifiPhy::StartReceiveHeader, this,
-                                                         event, remainingRxDuration);
+      m_endPreambleDetectionEvent = Simulator::Schedule (startOfPreambleDuration, &WifiPhy::MyStartReceiveHeader, this,
+                                                         event, remainingRxDuration, rxPowerW);
     }
   else
     {

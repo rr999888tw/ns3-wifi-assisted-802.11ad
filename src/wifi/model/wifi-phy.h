@@ -153,6 +153,8 @@ public:
    */
   void StartReceiveHeader (Ptr<Event> event, Time rxDuration);
 
+  void MyStartReceiveHeader (Ptr<Event> event, Time rxDuration, double rxPowerW);
+
   /**
    * Continue receiving the PHY header of a packet (i.e. after the end of receiving the legacy header part).
    *
@@ -1130,6 +1132,11 @@ public:
    * \param packet the packet being received
    */
   void NotifyRxBegin (Ptr<const Packet> packet);
+
+
+  void MyNotifyRxBegin (Ptr<const Packet> packet, double rxPowerW);
+
+  
   /**
    * Public method used to fire a PhyRxEnd trace.
    * Implemented for encapsulation purposes.
@@ -1781,6 +1788,8 @@ private:
    */
   TracedCallback<Ptr<const Packet> > m_phyRxBeginTrace;
 
+
+  TracedCallback<Ptr<const Packet>, double> m_phyRxBeginTrace2;
   /**
    * The trace source fired when a packet ends the reception process from
    * the medium.

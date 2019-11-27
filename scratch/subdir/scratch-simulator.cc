@@ -24,6 +24,7 @@ int
 main (int argc, char *argv[])
 {
   NS_LOG_UNCOND ("Scratch Simulator");
-  CommandLine cmd;
-  cmd.Parse (argc, argv);
+
+  Simulator::Run ();
+  Simulator::Destroy ();
 }
